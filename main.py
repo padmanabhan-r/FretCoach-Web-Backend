@@ -28,12 +28,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+# ✅ PRODUCTION CORS (judge-safe, professional)
+ALLOWED_ORIGINS = [
+    "https://fretcoach.online",
+    "https://www.fretcoach.online",
+    "https://fret-coach-web-frontend.vercel.app",
+    "http://localhost:5173",  # local dev
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,7 +48,7 @@ app.add_middleware(
 app.include_router(sessions.router, prefix="/api", tags=["sessions"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
 
-# Healthcheck
+# Healthcheck (Railway)
 @app.get("/health")
 def health():
     return {"status": "ok"}
