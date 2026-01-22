@@ -2,6 +2,7 @@
 FretCoach Dashboard API Server
 FastAPI backend for the website dashboard with AI Coach
 """
+#uvicorn main:app --host 0.0.0.0 --port 8000
 
 import os
 from fastapi import FastAPI
@@ -28,12 +29,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ✅ PRODUCTION CORS (judge-safe, professional)
+# ✅ PRODUCTION CORS 
 ALLOWED_ORIGINS = [
     "https://fretcoach.online",
     "https://www.fretcoach.online",
     "https://fret-coach-web-frontend.vercel.app",
-    "http://localhost:5173",  # local dev
+
+    # Local development
+    "http://localhost:5173",
+    "http://localhost:8080",
 ]
 
 app.add_middleware(
