@@ -327,6 +327,9 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
         if not isinstance(ai_content, str):
             ai_content = str(ai_content)
 
+        # Determine which model was used
+        model_used = result.get("model_used", "Unknown")
+
         # Return response in expected format
         response_data = {
             "success": True,
@@ -337,6 +340,7 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
             "chartData": chart_data,
             "planSaved": plan_saved,
             "hasPendingPlan": thread_id in pending_plans,
+            "modelUsed": model_used,
             "sessionContext": {
                 "total_sessions": context['total_sessions'],
                 "weakest_area": context['weakest_area']

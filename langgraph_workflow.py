@@ -7,6 +7,7 @@ from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 from operator import add
 
 # Try to import Opik for tracing
@@ -23,6 +24,9 @@ from langchain_anthropic import ChatAnthropic
 
 # Import tools
 from tools.database_tools import execute_sql_query, save_practice_plan, get_database_schema
+
+# Initialize shared memory checkpointer for conversation persistence
+checkpointer = MemorySaver()
 
 
 # Define the state for the conversation
@@ -70,51 +74,45 @@ def get_llm_with_tools(use_fallback: bool = False):
     return llm.bind_tools(tools)
 
 
-# System prompt for the AI coach
-SYSTEM_PROMPT = """You are an expert AI guitar practice coach for FretCoach, a guitar learning platform that tracks practice sessions with real-time feedback.
+# Core system prompt (always included - minimal, ~150 tokens)
+CORE_SYSTEM_PROMPT = """You are an AI guitar practice coach for FretCoach. Analyze practice data, provide insights, and generate personalized practice plans.
 
-Your role is to:
-1. Analyze users' practice data and provide insights
-2. Generate personalized practice plans based on performance
-3. Answer questions about progress, trends, and improvement areas
-4. Fetch and analyze session data from the database
+Tools available: get_database_schema, execute_sql_query, save_practice_plan
 
-Available Tools:
-- get_database_schema: Get information about available database tables and columns
-- execute_sql_query: Execute SELECT queries to fetch practice session data
-- save_practice_plan: Save generated practice plans to database
+Key rules:
+- User ID is {user_id} - always filter queries by this user_id
+- Query data using SQL tools, provide data-driven insights
+- Charts appear automatically when you query session metrics
+- Remember user information shared in conversation"""
 
-IMPORTANT - Automatic Chart Generation:
-When users ask to see their progress, trends, visualizations, or charts, the system will AUTOMATICALLY generate and display a visual chart below your response. You don't need to create the chart yourself - just query the data and describe the insights. The chart will appear automatically!
+# Detailed guidelines (only sent on first message to save tokens)
+DETAILED_GUIDELINES = """
+DETAILED INSTRUCTIONS (Reference):
 
-Database Information:
-- fretcoach.sessions: Contains all practice session data with metrics (pitch_accuracy, scale_conformity, timing_stability)
-- fretcoach.ai_practice_plans: Stores generated practice plans
+Database Schema:
+- fretcoach.sessions: Practice session data (pitch_accuracy, scale_conformity, timing_stability, scale_chosen, start_timestamp, etc.)
+- fretcoach.ai_practice_plans: Generated practice plans (JSON format)
 
-CRITICAL Guidelines:
-1. The user_id is provided to you in the system context - NEVER ask the user for it
-2. Always filter queries by the provided user_id when accessing session data
-3. Use tools to fetch data dynamically - never make assumptions about data
-4. When users ask for progress/trends/charts, query the data and provide insights - the visual chart will appear automatically
-5. When creating practice plans, structure them as JSON with exercises, durations, and goals
-6. Provide actionable, encouraging feedback based on actual data
-7. If you need to understand the schema, use get_database_schema tool first
-8. Return actual numbers and insights from the queried data
+Tool Usage:
+- get_database_schema: View available tables and columns
+- execute_sql_query: Run SELECT queries (read-only, automatically filtered for this user)
+- save_practice_plan: Store generated plans (JSON with exercises, durations, goals)
 
-Example queries (replace USER_ID with the actual user_id from context):
-- "Show my progress" or "Visualize my progress" →
-  Query: SELECT start_timestamp, pitch_accuracy, scale_conformity, timing_stability, scale_chosen
-        FROM fretcoach.sessions WHERE user_id = 'USER_ID'
-        ORDER BY start_timestamp DESC LIMIT 20
-  Response: Describe the trends you see in the data. A chart will automatically appear!
+Workflow for Progress/Trends Requests:
+1. Use execute_sql_query to fetch recent session data with metrics
+2. Analyze trends and provide specific insights with numbers
+3. Charts will auto-generate below your response - just describe the insights
 
-- "What's my average pitch accuracy?" →
-  SELECT AVG(pitch_accuracy) FROM fretcoach.sessions WHERE user_id = 'USER_ID'
+Example Queries:
+- Progress: SELECT start_timestamp, pitch_accuracy, scale_conformity, timing_stability FROM fretcoach.sessions WHERE user_id = '{user_id}' ORDER BY start_timestamp DESC LIMIT 20
+- Averages: SELECT AVG(pitch_accuracy), AVG(timing_stability) FROM fretcoach.sessions WHERE user_id = '{user_id}'
+- Scales practiced: SELECT DISTINCT scale_chosen FROM fretcoach.sessions WHERE user_id = '{user_id}'
 
-- "What scales have I practiced?" →
-  SELECT DISTINCT scale_chosen FROM fretcoach.sessions WHERE user_id = 'USER_ID'
-
-Be conversational, encouraging, and data-driven in your responses. Trust that charts will appear automatically when appropriate!
+Response Style:
+- Conversational and encouraging
+- Data-driven with specific numbers
+- Actionable recommendations
+- Remember user's name and preferences from conversation
 """
 
 
@@ -125,26 +123,23 @@ def create_agent_node(llm):
         messages = state["messages"]
         user_id = state["user_id"]
 
-        # Add system prompt with user_id context if this is the first message
-        if not any(isinstance(msg, SystemMessage) for msg in messages):
-            system_prompt_with_context = f"""{SYSTEM_PROMPT}
+        # Check if this is the first turn by counting conversation messages
+        # First turn: only 1 message (first user message)
+        # Subsequent turns: 3+ messages (user, assistant, user, ...)
+        conversation_messages = [m for m in messages if isinstance(m, (HumanMessage, AIMessage))]
+        is_first_turn = len(conversation_messages) <= 1
 
-CURRENT SESSION CONTEXT:
-- user_id: {user_id}
-- Always use this user_id ('{user_id}') in ALL SQL queries
-- NEVER ask the user for their user_id - you already have it!
+        if is_first_turn:
+            # First turn: Include CORE + DETAILED guidelines (full context, ~1150 tokens)
+            system_prompt = CORE_SYSTEM_PROMPT.format(user_id=user_id) + "\n\n" + DETAILED_GUIDELINES.format(user_id=user_id)
+        else:
+            # Subsequent turns: Only CORE prompt (lightweight, ~150 tokens)
+            # Saves ~1000 tokens per turn (60-70% reduction)
+            system_prompt = CORE_SYSTEM_PROMPT.format(user_id=user_id)
 
-IMPORTANT WORKFLOW:
-When users ask to "show", "visualize", "see", or "chart" their progress/trends:
-1. ALWAYS use execute_sql_query to fetch their recent session data with metrics
-2. Analyze the data and provide insights in your response
-3. The system will AUTOMATICALLY generate and display a visual chart below your response
-4. Simply end your response naturally - the chart will appear!
-
-Example response format:
-"Based on your last 10 sessions, I can see your pitch accuracy has improved from 75% to 85%! Your timing is also getting more consistent. [A performance trend chart will appear below automatically]" """
-            system_message = SystemMessage(content=system_prompt_with_context)
-            messages = [system_message] + list(messages)
+        # Add system message to messages (only for LLM input, not persisted in state)
+        system_message = SystemMessage(content=system_prompt)
+        messages = [system_message] + list(messages)
 
         # Invoke the LLM
         response = llm.invoke(messages)
@@ -209,8 +204,8 @@ def create_workflow():
     # Add edge from tools back to agent
     workflow.add_edge("tools", "agent")
 
-    # Compile the graph
-    return workflow.compile()
+    # Compile the graph with memory checkpointer for conversation persistence
+    return workflow.compile(checkpointer=checkpointer)
 
 
 def create_workflow_with_fallback():
@@ -249,8 +244,8 @@ def create_workflow_with_fallback():
     # Add edge from tools back to agent
     workflow.add_edge("tools", "agent")
 
-    # Compile the graph
-    return workflow.compile()
+    # Compile the graph with memory checkpointer for conversation persistence
+    return workflow.compile(checkpointer=checkpointer)
 
 
 # Create compiled workflows
@@ -286,6 +281,22 @@ def invoke_workflow(
         elif msg.get("role") == "system":
             lc_messages.append(SystemMessage(content=msg["content"]))
 
+    # With checkpointer enabled, only send new messages to avoid duplicates.
+    # For continuing conversations (with thread_id), send only the last message (new user input).
+    # For new conversations (first message), send all messages.
+    if thread_id and len(lc_messages) > 1:
+        # Get the workflow to check existing state
+        workflow = fallback_workflow if use_fallback else primary_workflow
+        try:
+            # Check if this thread has existing state
+            state = workflow.get_state(config={"configurable": {"thread_id": thread_id}})
+            if state.values.get("messages"):
+                # Thread exists, only send the last message (new user message)
+                lc_messages = [lc_messages[-1]]
+        except Exception:
+            # Thread doesn't exist yet, send all messages
+            pass
+
     # Prepare initial state
     initial_state = {
         "messages": lc_messages,
@@ -293,6 +304,9 @@ def invoke_workflow(
         "thread_id": thread_id,
         "next_action": None
     }
+
+    # Select workflow first so we can access its graph for Opik tracing
+    workflow = fallback_workflow if use_fallback else primary_workflow
 
     # Configure Opik tracing if available
     config = {}
@@ -304,15 +318,13 @@ def invoke_workflow(
                 "user_id": user_id,
                 "thread_id": thread_id or "no-thread",
                 "model": "fallback" if use_fallback else "primary"
-            }
+            },
+            graph=workflow.get_graph(xray=True)  # Enable graph visualization in Opik
         )
         config["callbacks"] = [tracer]
 
     if thread_id:
         config["configurable"] = {"thread_id": thread_id}
-
-    # Select workflow
-    workflow = fallback_workflow if use_fallback else primary_workflow
 
     # Invoke workflow
     try:
@@ -355,7 +367,8 @@ def invoke_workflow(
                 return {
                     "response": response_content,
                     "tool_calls": tool_results,
-                    "success": True
+                    "success": True,
+                    "model_used": "MiniMax-M2.1" if use_fallback else "Gemini 2.5 Flash"
                 }
 
         return {

@@ -225,12 +225,14 @@ try:
     from opik.integrations.langchain import OpikTracer
 
     if os.getenv("OPIK_API_KEY"):
+        # Test with graph visualization (xray=True)
         tracer = OpikTracer(
             project_name=os.getenv("OPIK_PROJECT_NAME", "FretCoach-Test"),
             tags=["test"],
-            metadata={"test": True}
+            metadata={"test": True},
+            graph=primary_workflow.get_graph(xray=True)  # Enable graph visualization
         )
-        print("  ✓ Opik integration configured")
+        print("  ✓ Opik integration configured with graph visualization")
     else:
         print("  ⚠ Opik not configured (OPIK_API_KEY not set)")
         print("    System will work without Opik (graceful degradation)")
