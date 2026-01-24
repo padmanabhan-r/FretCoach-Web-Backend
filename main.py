@@ -21,15 +21,15 @@ if os.getenv("OPIK_API_KEY"):
     except Exception as e:
         print(f"[Opik] Configuration skipped: {e}")
 
-from routers import sessions, chat
+from routers import sessions, chat_langgraph
 
 app = FastAPI(
     title="FretCoach Dashboard API",
-    description="API for the FretCoach web dashboard with AI Practice Coach",
-    version="1.0.0"
+    description="API for the FretCoach web dashboard with AI Practice Coach (LangGraph)",
+    version="2.0.0"
 )
 
-# ✅ PRODUCTION CORS 
+# ✅ PRODUCTION CORS
 ALLOWED_ORIGINS = [
     "https://fretcoach.online",
     "https://www.fretcoach.online",
@@ -50,7 +50,7 @@ app.add_middleware(
 
 # Routers
 app.include_router(sessions.router, prefix="/api", tags=["sessions"])
-app.include_router(chat.router, prefix="/api", tags=["chat"])
+app.include_router(chat_langgraph.router, prefix="/api", tags=["chat"])
 
 # Healthcheck (Railway)
 @app.get("/health")
