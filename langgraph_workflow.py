@@ -19,7 +19,8 @@ except ImportError:
     OPIK_ENABLED = False
 
 # Import LLM models
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_anthropic import ChatAnthropic
 
 # Import tools
 from tools.database_tools import execute_sql_query, save_practice_plan, get_database_schema
@@ -37,10 +38,13 @@ class AgentState(TypedDict):
     next_action: Optional[str]
 
 
-# Initialize LLM
-def get_llm_with_tools():
+# Initialize LLM with fallback
+def get_llm_with_tools(use_fallback: bool = False):
     """
     Get LLM instance with tools bound.
+
+    Args:
+        use_fallback: If True, use MiniMax (via Anthropic), else use Gemini
 
     Returns:
         LLM instance with tools bound
@@ -52,11 +56,20 @@ def get_llm_with_tools():
         save_practice_plan
     ]
 
-    # Use OpenAI GPT-4o-mini
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.7
-    )
+    if use_fallback:
+        # Use MiniMax via Anthropic wrapper
+        llm = ChatAnthropic(
+            model="MiniMax-M2.1",
+            temperature=0.7,
+            base_url=os.getenv("ANTHROPIC_BASE_URL")
+        )
+    else:
+        # Use Gemini
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0.7,
+            convert_system_message_to_human=True
+        )
 
     return llm.bind_tools(tools)
 
@@ -157,8 +170,8 @@ def should_continue(state: AgentState) -> str:
 def create_workflow():
     """Create the LangGraph workflow"""
 
-    # Initialize LLM (GPT-4o-mini)
-    llm = get_llm_with_tools()
+    # Initialize with primary LLM (Gemini)
+    llm = get_llm_with_tools(use_fallback=False)
 
     # Create the graph
     workflow = StateGraph(AgentState)
@@ -195,14 +208,56 @@ def create_workflow():
     return workflow.compile(checkpointer=checkpointer)
 
 
-# Create compiled workflow
-workflow = create_workflow()
+def create_workflow_with_fallback():
+    """Create workflow with fallback LLM (MiniMax)"""
+
+    llm = get_llm_with_tools(use_fallback=True)
+
+    # Create the graph
+    workflow = StateGraph(AgentState)
+
+    # Create nodes
+    agent_node = create_agent_node(llm)
+    tool_node = ToolNode([
+        get_database_schema,
+        execute_sql_query,
+        save_practice_plan
+    ])
+
+    # Add nodes to graph
+    workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", tool_node)
+
+    # Set entry point
+    workflow.set_entry_point("agent")
+
+    # Add conditional edges
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {
+            "tools": "tools",
+            "end": END
+        }
+    )
+
+    # Add edge from tools back to agent
+    workflow.add_edge("tools", "agent")
+
+    # Compile the graph with memory checkpointer for conversation persistence
+    return workflow.compile(checkpointer=checkpointer)
+
+
+# Create compiled workflows
+primary_workflow = create_workflow()
+fallback_workflow = create_workflow_with_fallback()
 
 
 def invoke_workflow(
     messages: list,
     user_id: str = "default_user",
-    thread_id: Optional[str] = None
+    thread_id: Optional[str] = None,
+    use_fallback: bool = False
 ) -> Dict[str, Any]:
     """
     Invoke the LangGraph workflow with Opik tracing.
@@ -211,6 +266,7 @@ def invoke_workflow(
         messages: List of chat messages
         user_id: User identifier
         thread_id: Thread ID for conversation tracking
+        use_fallback: Whether to use fallback LLM
 
     Returns:
         Dict with response and metadata
@@ -229,6 +285,8 @@ def invoke_workflow(
     # For continuing conversations (with thread_id), send only the last message (new user input).
     # For new conversations (first message), send all messages.
     if thread_id and len(lc_messages) > 1:
+        # Get the workflow to check existing state
+        workflow = fallback_workflow if use_fallback else primary_workflow
         try:
             # Check if this thread has existing state
             state = workflow.get_state(config={"configurable": {"thread_id": thread_id}})
@@ -247,6 +305,9 @@ def invoke_workflow(
         "next_action": None
     }
 
+    # Select workflow first so we can access its graph for Opik tracing
+    workflow = fallback_workflow if use_fallback else primary_workflow
+
     # Configure Opik tracing if available
     config = {}
     if OPIK_ENABLED and OpikTracer:
@@ -256,7 +317,7 @@ def invoke_workflow(
             metadata={
                 "user_id": user_id,
                 "thread_id": thread_id or "no-thread",
-                "model": "gpt-4o-mini"
+                "model": "fallback" if use_fallback else "primary"
             },
             graph=workflow.get_graph(xray=True)  # Enable graph visualization in Opik
         )
@@ -307,7 +368,7 @@ def invoke_workflow(
                     "response": response_content,
                     "tool_calls": tool_results,
                     "success": True,
-                    "model_used": "GPT-4o-mini"
+                    "model_used": "MiniMax-M2.1" if use_fallback else "Gemini 2.5 Flash"
                 }
 
         return {
@@ -316,6 +377,10 @@ def invoke_workflow(
         }
 
     except Exception as e:
+        error_str = str(e).upper()
+        # Raise exception for rate limit errors so caller can retry with fallback
+        if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str:
+            raise
         return {
             "response": f"An error occurred: {str(e)}",
             "success": False,

@@ -206,12 +206,28 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
         # Convert messages to format expected by workflow
         workflow_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
-        # Invoke LangGraph workflow
-        result = invoke_workflow(
-            messages=workflow_messages,
-            user_id=request.user_id,
-            thread_id=thread_id
-        )
+        # Invoke LangGraph workflow with fallback handling
+        use_fallback = False
+        result = None
+
+        try:
+            result = invoke_workflow(
+                messages=workflow_messages,
+                user_id=request.user_id,
+                thread_id=thread_id,
+                use_fallback=False
+            )
+        except Exception as e:
+            error_str = str(e).upper()
+            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str:
+                result = invoke_workflow(
+                    messages=workflow_messages,
+                    user_id=request.user_id,
+                    thread_id=thread_id,
+                    use_fallback=True
+                )
+            else:
+                raise
 
         if not result or not result.get("success"):
             raise HTTPException(status_code=500, detail="Workflow execution failed")
