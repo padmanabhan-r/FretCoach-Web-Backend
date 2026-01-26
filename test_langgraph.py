@@ -16,8 +16,8 @@ print("=" * 60)
 
 # Test 1: Environment Variables
 print("\n[Test 1] Checking environment variables...")
-required_vars = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD", "GOOGLE_API_KEY"]
-optional_vars = ["OPIK_API_KEY", "MINIMAX_API_KEY"]
+required_vars = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD", "OPENAI_API_KEY"]
+optional_vars = ["OPIK_API_KEY"]
 
 env_ok = True
 for var in required_vars:
@@ -83,13 +83,10 @@ except ImportError as e:
 # Test 5: Test Workflow Creation
 print("\n[Test 5] Testing workflow creation...")
 try:
-    from langgraph_workflow import create_workflow, create_workflow_with_fallback
+    from langgraph_workflow import create_workflow, workflow
 
-    workflow = create_workflow()
-    print("  ✓ Primary workflow created successfully")
-
-    fallback_workflow = create_workflow_with_fallback()
-    print("  ✓ Fallback workflow created successfully")
+    test_workflow = create_workflow()
+    print("  ✓ Workflow created successfully")
 except Exception as e:
     print(f"  ✗ Workflow creation failed: {e}")
     import traceback
@@ -223,6 +220,7 @@ except Exception as e:
 print("\n[Test 10] Testing Opik integration...")
 try:
     from opik.integrations.langchain import OpikTracer
+    from langgraph_workflow import workflow
 
     if os.getenv("OPIK_API_KEY"):
         # Test with graph visualization (xray=True)
@@ -230,7 +228,7 @@ try:
             project_name=os.getenv("OPIK_PROJECT_NAME", "FretCoach-Test"),
             tags=["test"],
             metadata={"test": True},
-            graph=primary_workflow.get_graph(xray=True)  # Enable graph visualization
+            graph=workflow.get_graph(xray=True)  # Enable graph visualization
         )
         print("  ✓ Opik integration configured with graph visualization")
     else:
