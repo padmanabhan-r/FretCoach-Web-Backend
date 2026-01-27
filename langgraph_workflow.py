@@ -10,20 +10,15 @@ from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from operator import add
 
-# Try to import Opik for tracing
-try:
-    from opik.integrations.langchain import OpikTracer
-    OPIK_ENABLED = True
-except ImportError:
-    OpikTracer = None
-    OPIK_ENABLED = False
+# Import Opik for tracing
+from opik.integrations.langchain import OpikTracer
 
 # Import LLM models
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_anthropic import ChatAnthropic
 
 # Import tools
-from tools.database_tools import execute_sql_query, save_practice_plan, get_database_schema
+from tools.database_tools import execute_sql_query, get_database_schema
 
 # Initialize shared memory checkpointer for conversation persistence
 checkpointer = MemorySaver()
@@ -49,11 +44,10 @@ def get_llm_with_tools(use_fallback: bool = False):
     Returns:
         LLM instance with tools bound
     """
-    # Only include database tools - plotting will be handled by the router
+    # Only include database tools for querying - practice plan saving is handled by the frontend
     tools = [
         get_database_schema,
-        execute_sql_query,
-        save_practice_plan
+        execute_sql_query
     ]
 
     if use_fallback:
@@ -77,12 +71,13 @@ def get_llm_with_tools(use_fallback: bool = False):
 # Core system prompt (always included - minimal, ~150 tokens)
 CORE_SYSTEM_PROMPT = """You are an AI guitar practice coach for FretCoach. Analyze practice data, provide insights, and generate personalized practice plans.
 
-Tools available: get_database_schema, execute_sql_query, save_practice_plan
+Tools available: get_database_schema, execute_sql_query
 
 Key rules:
 - User ID is {user_id} - always filter queries by this user_id
 - Query data using SQL tools, provide data-driven insights
 - Charts appear automatically when you query session metrics
+- When generating practice plans, output JSON with: focus_area, current_score, suggested_scale, suggested_scale_type, session_target, exercises (array of strings)
 - Remember user information shared in conversation"""
 
 # Detailed guidelines (only sent on first message to save tokens)
@@ -96,7 +91,18 @@ Database Schema:
 Tool Usage:
 - get_database_schema: View available tables and columns
 - execute_sql_query: Run SELECT queries (read-only, automatically filtered for this user)
-- save_practice_plan: Store generated plans (JSON with exercises, durations, goals)
+
+Practice Plan Generation:
+- Generate practice plans as JSON in your response with this exact format:
+  {
+    "focus_area": "string (e.g., 'Pitch Accuracy', 'Timing Stability')",
+    "current_score": number (0-100),
+    "suggested_scale": "string (e.g., 'C minor', 'G major')",
+    "suggested_scale_type": "string (e.g., 'natural minor', 'major')",
+    "session_target": "string (e.g., '15-20 minutes')",
+    "exercises": ["string", "string", ...] (array of exercise descriptions as strings)
+  }
+- The user will save the plan using a Save button on the UI
 
 Workflow for Progress/Trends Requests:
 1. Use execute_sql_query to fetch recent session data with metrics
@@ -180,8 +186,7 @@ def create_workflow():
     agent_node = create_agent_node(llm)
     tool_node = ToolNode([
         get_database_schema,
-        execute_sql_query,
-        save_practice_plan
+        execute_sql_query
     ])
 
     # Add nodes to graph
@@ -220,8 +225,7 @@ def create_workflow_with_fallback():
     agent_node = create_agent_node(llm)
     tool_node = ToolNode([
         get_database_schema,
-        execute_sql_query,
-        save_practice_plan
+        execute_sql_query
     ])
 
     # Add nodes to graph
@@ -308,20 +312,18 @@ def invoke_workflow(
     # Select workflow first so we can access its graph for Opik tracing
     workflow = fallback_workflow if use_fallback else primary_workflow
 
-    # Configure Opik tracing if available
-    config = {}
-    if OPIK_ENABLED and OpikTracer:
-        tracer = OpikTracer(
-            project_name=os.getenv("OPIK_PROJECT_NAME", "FretCoach"),
-            tags=["ai-coach", "langgraph", "practice-plan"],
-            metadata={
-                "user_id": user_id,
-                "thread_id": thread_id or "no-thread",
-                "model": "fallback" if use_fallback else "primary"
-            },
-            graph=workflow.get_graph(xray=True)  # Enable graph visualization in Opik
-        )
-        config["callbacks"] = [tracer]
+    # Configure Opik tracing
+    tracer = OpikTracer(
+        project_name=os.getenv("OPIK_PROJECT_NAME", "FretCoach"),
+        tags=["ai-coach", "langgraph", "practice-plan"],
+        metadata={
+            "user_id": user_id,
+            "thread_id": thread_id or "no-thread",
+            "model": "fallback" if use_fallback else "primary"
+        },
+        graph=workflow.get_graph(xray=True)  # Enable graph visualization in Opik
+    )
+    config = {"callbacks": [tracer]}
 
     if thread_id:
         config["configurable"] = {"thread_id": thread_id}

@@ -13,7 +13,7 @@ import uuid
 import re
 from psycopg2.extras import RealDictCursor
 from database import get_db_connection
-from langgraph_workflow import invoke_workflow, OPIK_ENABLED
+from langgraph_workflow import invoke_workflow
 
 # Import Opik for tracking
 try:
@@ -78,7 +78,16 @@ def extract_practice_plan_from_response(response: str, tool_calls: List[Dict[str
     # Check tool calls for saved practice plans
     for tool_call in tool_calls:
         if tool_call.get("tool") == "save_practice_plan":
-            result = tool_call.get("result", {})
+            result_str = tool_call.get("result", "")
+            # Parse JSON if it's a string
+            if isinstance(result_str, str):
+                try:
+                    result = json.loads(result_str)
+                except:
+                    continue
+            else:
+                result = result_str
+
             if result.get("success"):
                 return {
                     "plan_id": result.get("practice_id"),
@@ -289,6 +298,15 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
         # Extract practice plan if present
         practice_plan = extract_practice_plan_from_response(ai_content, tool_calls)
 
+        # Remove JSON from response text if practice plan was extracted
+        if practice_plan and not practice_plan.get("saved"):
+            # Remove the JSON block (with or without markdown code fences) from ai_content
+            # Match: ```json\n{...}\n``` OR just {...}
+            json_pattern = r'```json\s*\{[\s\S]*?"exercises"[\s\S]*?\}\s*```|\{[\s\S]*?"exercises"[\s\S]*?\}'
+            ai_content = re.sub(json_pattern, '', ai_content)
+            # Clean up multiple newlines and whitespace
+            ai_content = re.sub(r'\n{3,}', '\n\n', ai_content).strip()
+
         # Handle practice plan
         if practice_plan and not practice_plan.get("saved"):
             # Store as pending plan
@@ -356,6 +374,9 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[ERROR] Chat endpoint failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 
