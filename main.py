@@ -12,14 +12,10 @@ from dotenv import load_dotenv
 # Load env vars (local .env or Railway vars)
 load_dotenv()
 
-# Optional: Opik
-if os.getenv("OPIK_API_KEY"):
-    try:
-        from opik import configure
-        configure()
-        print("[Opik] Configured successfully")
-    except Exception as e:
-        print(f"[Opik] Configuration skipped: {e}")
+# Configure Opik
+from opik import configure
+configure()
+print("[Opik] Configured successfully")
 
 from routers import sessions, chat_langgraph
 

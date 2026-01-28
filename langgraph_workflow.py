@@ -16,6 +16,7 @@ from opik.integrations.langchain import OpikTracer
 # Import LLM models
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
 # Import tools
 from tools.database_tools import execute_sql_query, get_database_schema
@@ -39,7 +40,7 @@ def get_llm_with_tools(use_fallback: bool = False):
     Get LLM instance with tools bound.
 
     Args:
-        use_fallback: If True, use MiniMax (via Anthropic), else use Gemini
+        use_fallback: If True, use MiniMax (via Anthropic), else use primary model
 
     Returns:
         LLM instance with tools bound
@@ -58,12 +59,22 @@ def get_llm_with_tools(use_fallback: bool = False):
             base_url=os.getenv("ANTHROPIC_BASE_URL")
         )
     else:
-        # Use Gemini
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.7,
-            convert_system_message_to_human=True
-        )
+        # Use OpenAI or Gemini based on USE_OPENAI_MODEL flag
+        use_openai = os.getenv("USE_OPENAI_MODEL", "").lower() == "true"
+
+        if use_openai:
+            # Use OpenAI with model from OPENAI_MODEL env var
+            llm = ChatOpenAI(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                temperature=0.7
+            )
+        else:
+            # Use Gemini (default)
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash",
+                temperature=0.7,
+                convert_system_message_to_human=True
+            )
 
     return llm.bind_tools(tools)
 
@@ -257,6 +268,15 @@ primary_workflow = create_workflow()
 fallback_workflow = create_workflow_with_fallback()
 
 
+def get_model_name(use_fallback: bool = False) -> str:
+    """Get the model name being used"""
+    if use_fallback:
+        return "MiniMax-M2.1"
+    else:
+        use_openai = os.getenv("USE_OPENAI_MODEL", "").lower() == "true"
+        return os.getenv("OPENAI_MODEL", "gpt-4o-mini") if use_openai else "gemini-2.5-flash"
+
+
 def invoke_workflow(
     messages: list,
     user_id: str = "default_user",
@@ -312,16 +332,27 @@ def invoke_workflow(
     # Select workflow first so we can access its graph for Opik tracing
     workflow = fallback_workflow if use_fallback else primary_workflow
 
+    # Get model name for tags and metadata
+    model_name = get_model_name(use_fallback)
+
+    # Base tags for all AI coach chat traces
+    base_tags = [
+        "fretcoach-hub",
+        "ai-coach-chat",
+        "from-hub-dashboard",
+        "practice-plan",
+        model_name
+    ]
+
     # Configure Opik tracing
     tracer = OpikTracer(
         project_name=os.getenv("OPIK_PROJECT_NAME", "FretCoach"),
-        tags=["ai-coach", "langgraph", "practice-plan"],
+        tags=base_tags,
         metadata={
             "user_id": user_id,
-            "thread_id": thread_id or "no-thread",
-            "model": "fallback" if use_fallback else "primary"
+            "model": model_name
         },
-        graph=workflow.get_graph(xray=True)  # Enable graph visualization in Opik
+        graph=workflow.get_graph(xray=True)
     )
     config = {"callbacks": [tracer]}
 
@@ -366,11 +397,15 @@ def invoke_workflow(
                             "result": msg.content
                         })
 
+                # Check if response contains a practice plan
+                has_practice_plan = '"exercises"' in response_content and '{' in response_content
+
                 return {
                     "response": response_content,
                     "tool_calls": tool_results,
                     "success": True,
-                    "model_used": "MiniMax-M2.1" if use_fallback else "Gemini 2.5 Flash"
+                    "model_used": model_name,
+                    "has_practice_plan": has_practice_plan
                 }
 
         return {

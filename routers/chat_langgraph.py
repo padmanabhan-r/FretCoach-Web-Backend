@@ -16,13 +16,7 @@ from database import get_db_connection
 from langgraph_workflow import invoke_workflow
 
 # Import Opik for tracking
-try:
-    from opik import track
-except ImportError:
-    def track(name=None, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
+from opik import track, opik_context
 
 router = APIRouter()
 
@@ -195,7 +189,28 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
     Maintains backward compatibility with frontend expectations.
     """
     # Set thread_id for conversation tracking
-    thread_id = request.thread_id or f"chat-{request.user_id}"
+    thread_id = request.thread_id or f"hub-{request.user_id}"
+
+    # Determine model name
+    use_openai = os.getenv("USE_OPENAI_MODEL", "").lower() == "true"
+    model_name = "gpt-4o-mini" if use_openai else "gemini-2.5-flash"
+
+    # Set thread_id and tags in Opik trace
+    try:
+        opik_context.update_current_trace(
+            thread_id=thread_id,
+            tags=[
+                "fretcoach-hub",
+                "ai-coach-chat",
+                "from-hub-dashboard",
+                "practice-plan",
+                "ai-coach-chat-thread",
+                "ai-coach-chat-full-conversation",
+                model_name
+            ]
+        )
+    except Exception:
+        pass
 
     try:
         # Get quick context for response enrichment
