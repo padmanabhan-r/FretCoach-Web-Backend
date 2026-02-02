@@ -1,6 +1,6 @@
 """
-FretCoach Dashboard API Server
-FastAPI backend for the website dashboard with AI Coach
+FretCoach Hub API Server
+FastAPI backend for FretCoach Hub with AI Coach
 """
 #uvicorn main:app --host 0.0.0.0 --port 8000
 
@@ -20,8 +20,8 @@ print("[Opik] Configured successfully")
 from routers import sessions, chat_langgraph
 
 app = FastAPI(
-    title="FretCoach Dashboard API",
-    description="API for the FretCoach web dashboard with AI Practice Coach (LangGraph)",
+    title="FretCoach Hub API",
+    description="API for FretCoach Hub with AI Practice Coach (LangGraph)",
     version="2.0.0"
 )
 
