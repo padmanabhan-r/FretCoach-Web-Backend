@@ -40,6 +40,23 @@ class SavePlanRequest(BaseModel):
     user_id: str = "default_user"
 
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Safely convert a value to float, handling None, objects, and strings"""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        # If it's a dict/object, return default
+        print(f"[WARNING] Expected number but got object: {value}")
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        print(f"[WARNING] Could not convert to float: {value}")
+        return default
+
+
 def extract_data_from_tool_results(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Extract query results from tool call results.
@@ -57,8 +74,15 @@ def extract_data_from_tool_results(tool_calls: List[Dict[str, Any]]) -> List[Dic
                 parsed = json.loads(result)
                 if parsed.get("success") and parsed.get("data"):
                     data = parsed["data"]
+                    # Sanitize numeric fields to prevent objects from being passed through
+                    for row in data:
+                        if isinstance(row, dict):
+                            for key in ['pitch_accuracy', 'scale_conformity', 'timing_stability']:
+                                if key in row:
+                                    row[key] = safe_float(row[key])
                     all_data.extend(data)
-            except Exception:
+            except Exception as e:
+                print(f"[ERROR] Failed to parse tool result: {e}")
                 pass
 
     return all_data
@@ -151,21 +175,27 @@ def get_quick_context(user_id: str) -> Dict[str, Any]:
 
             stats = cursor.fetchone()
 
+            # Safely extract numeric values
+            avg_pitch = safe_float(stats.get('avg_pitch', 0))
+            avg_scale = safe_float(stats.get('avg_scale', 0))
+            avg_timing = safe_float(stats.get('avg_timing', 0))
+            total_sessions = int(stats.get('total_sessions', 0)) if stats.get('total_sessions') else 0
+
             # Determine weakest area
             weakest_area = "pitch accuracy"
-            min_score = stats['avg_pitch']
-            if stats['avg_scale'] < min_score:
+            min_score = avg_pitch
+            if avg_scale < min_score:
                 weakest_area = "scale conformity"
-                min_score = stats['avg_scale']
-            if stats['avg_timing'] < min_score:
+                min_score = avg_scale
+            if avg_timing < min_score:
                 weakest_area = "timing stability"
 
             return {
-                "total_sessions": stats['total_sessions'],
+                "total_sessions": total_sessions,
                 "weakest_area": weakest_area,
-                "avg_pitch": round(stats['avg_pitch'], 1),
-                "avg_scale": round(stats['avg_scale'], 1),
-                "avg_timing": round(stats['avg_timing'], 1)
+                "avg_pitch": round(avg_pitch, 1),
+                "avg_scale": round(avg_scale, 1),
+                "avg_timing": round(avg_timing, 1)
             }
 
     except Exception as e:
@@ -230,26 +260,71 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
         # Convert messages to format expected by workflow
         workflow_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
-        # Invoke LangGraph workflow with fallback handling
+        # Invoke LangGraph workflow with fallback handling and timeout
         use_fallback = False
         result = None
 
+        # Check if we should use timeout (enabled by default for serverless)
+        enable_timeout = os.getenv("ENABLE_WORKFLOW_TIMEOUT", "true").lower() == "true"
+        timeout_seconds = float(os.getenv("WORKFLOW_TIMEOUT_SECONDS", "25"))
+
         try:
-            result = invoke_workflow(
-                messages=workflow_messages,
-                user_id=request.user_id,
-                thread_id=thread_id,
-                use_fallback=False
-            )
-        except Exception as e:
-            error_str = str(e).upper()
-            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str:
+            if enable_timeout:
+                # Add timeout for serverless environments (Railway has ~30s limit)
+                import asyncio
+
+                # Run workflow with timeout to leave buffer for response
+                async def run_with_timeout():
+                    loop = asyncio.get_event_loop()
+                    return await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            invoke_workflow,
+                            workflow_messages,
+                            request.user_id,
+                            thread_id,
+                            False
+                        ),
+                        timeout=timeout_seconds
+                    )
+
+                try:
+                    result = await run_with_timeout()
+                except asyncio.TimeoutError:
+                    print(f"[WARNING] Workflow timed out after {timeout_seconds}s (serverless cold start?)")
+                    # Return a simple response instead of failing
+                    return {
+                        "success": True,
+                        "message": {
+                            "role": "assistant",
+                            "content": "I'm warming up (serverless cold start). Please try your request again in a moment!"
+                        },
+                        "chartData": None,
+                        "modelUsed": "timeout",
+                        "sessionContext": context
+                    }
+            else:
+                # No timeout in development
                 result = invoke_workflow(
                     messages=workflow_messages,
                     user_id=request.user_id,
                     thread_id=thread_id,
-                    use_fallback=True
+                    use_fallback=False
                 )
+
+        except Exception as e:
+            error_str = str(e).upper()
+            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str:
+                try:
+                    result = invoke_workflow(
+                        messages=workflow_messages,
+                        user_id=request.user_id,
+                        thread_id=thread_id,
+                        use_fallback=True
+                    )
+                except Exception as fallback_error:
+                    print(f"[ERROR] Fallback workflow also failed: {fallback_error}")
+                    raise HTTPException(status_code=500, detail="Both primary and fallback models failed")
             else:
                 raise
 
@@ -298,14 +373,14 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
                     if current:
                         chart_result = create_comparison_chart.invoke({
                             "current_metrics": {
-                                "pitch_accuracy": current.get("pitch_accuracy", 0),
-                                "scale_conformity": current.get("scale_conformity", 0),
-                                "timing_stability": current.get("timing_stability", 0)
+                                "pitch_accuracy": safe_float(current.get("pitch_accuracy", 0)),
+                                "scale_conformity": safe_float(current.get("scale_conformity", 0)),
+                                "timing_stability": safe_float(current.get("timing_stability", 0))
                             },
                             "average_metrics": {
-                                "pitch_accuracy": avg_metrics.get("avg_pitch", 0),
-                                "scale_conformity": avg_metrics.get("avg_scale", 0),
-                                "timing_stability": avg_metrics.get("avg_timing", 0)
+                                "pitch_accuracy": safe_float(avg_metrics.get("avg_pitch", 0)),
+                                "scale_conformity": safe_float(avg_metrics.get("avg_scale", 0)),
+                                "timing_stability": safe_float(avg_metrics.get("avg_timing", 0))
                             }
                         })
                         chart_data = chart_result
