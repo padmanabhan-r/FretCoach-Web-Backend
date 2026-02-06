@@ -416,8 +416,12 @@ def invoke_workflow(
     except Exception as e:
         error_str = str(e).upper()
         # Raise exception for rate limit errors so caller can retry with fallback
-        if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str:
-            raise
+        if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str or "QUOTA" in error_str:
+            print(f"[ERROR] Rate limit error detected in workflow: {str(e)[:200]}")
+            raise  # Re-raise to trigger fallback in caller
+
+        # For other errors, log and return error response
+        print(f"[ERROR] Workflow error: {str(e)[:200]}")
         return {
             "response": f"An error occurred: {str(e)}",
             "success": False,

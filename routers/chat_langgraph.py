@@ -260,61 +260,23 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
         # Convert messages to format expected by workflow
         workflow_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
-        # Invoke LangGraph workflow with fallback handling and timeout
-        use_fallback = False
+        # Invoke LangGraph workflow with fallback handling
         result = None
 
-        # Check if we should use timeout (enabled by default for serverless)
-        enable_timeout = os.getenv("ENABLE_WORKFLOW_TIMEOUT", "true").lower() == "true"
-        timeout_seconds = float(os.getenv("WORKFLOW_TIMEOUT_SECONDS", "25"))
-
+        # Try primary model first, with automatic fallback on rate limits
         try:
-            if enable_timeout:
-                # Add timeout for serverless environments (Railway has ~30s limit)
-                import asyncio
-
-                # Run workflow with timeout to leave buffer for response
-                async def run_with_timeout():
-                    loop = asyncio.get_event_loop()
-                    return await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            invoke_workflow,
-                            workflow_messages,
-                            request.user_id,
-                            thread_id,
-                            False
-                        ),
-                        timeout=timeout_seconds
-                    )
-
-                try:
-                    result = await run_with_timeout()
-                except asyncio.TimeoutError:
-                    print(f"[WARNING] Workflow timed out after {timeout_seconds}s (serverless cold start?)")
-                    # Return a simple response instead of failing
-                    return {
-                        "success": True,
-                        "message": {
-                            "role": "assistant",
-                            "content": "I'm warming up (serverless cold start). Please try your request again in a moment!"
-                        },
-                        "chartData": None,
-                        "modelUsed": "timeout",
-                        "sessionContext": context
-                    }
-            else:
-                # No timeout in development
-                result = invoke_workflow(
-                    messages=workflow_messages,
-                    user_id=request.user_id,
-                    thread_id=thread_id,
-                    use_fallback=False
-                )
-
+            result = invoke_workflow(
+                messages=workflow_messages,
+                user_id=request.user_id,
+                thread_id=thread_id,
+                use_fallback=False
+            )
         except Exception as e:
             error_str = str(e).upper()
-            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str:
+            # Check if it's a rate limit / quota error
+            if "RESOURCE_EXHAUSTED" in error_str or "429" in error_str or "RATE" in error_str or "QUOTA" in error_str:
+                print(f"[WARNING] Primary model rate limited: {str(e)[:200]}")
+                print("[INFO] Automatically switching to fallback model (MiniMax)")
                 try:
                     result = invoke_workflow(
                         messages=workflow_messages,
@@ -322,10 +284,15 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
                         thread_id=thread_id,
                         use_fallback=True
                     )
+                    print("[SUCCESS] Fallback model responded successfully")
                 except Exception as fallback_error:
-                    print(f"[ERROR] Fallback workflow also failed: {fallback_error}")
-                    raise HTTPException(status_code=500, detail="Both primary and fallback models failed")
+                    print(f"[ERROR] Fallback model also failed: {fallback_error}")
+                    raise HTTPException(
+                        status_code=503,
+                        detail="AI service temporarily unavailable. Please try again in a few moments."
+                    )
             else:
+                # Other errors - let them propagate
                 raise
 
         if not result or not result.get("success"):
