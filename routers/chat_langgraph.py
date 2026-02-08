@@ -223,7 +223,7 @@ async def chat(request: ChatRequest) -> Dict[str, Any]:
 
     # Determine model name
     use_openai = os.getenv("USE_OPENAI_MODEL", "").lower() == "true"
-    model_name = "gpt-4o-mini" if use_openai else "gemini-2.5-flash"
+    model_name = "gpt-4o-mini" if use_openai else os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
     # Set thread_id and tags in Opik trace
     try:

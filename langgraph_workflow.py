@@ -71,7 +71,7 @@ def get_llm_with_tools(use_fallback: bool = False):
         else:
             # Use Gemini (default)
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
                 temperature=0.7,
                 convert_system_message_to_human=True
             )
@@ -274,7 +274,7 @@ def get_model_name(use_fallback: bool = False) -> str:
         return "MiniMax-M2.1"
     else:
         use_openai = os.getenv("USE_OPENAI_MODEL", "").lower() == "true"
-        return os.getenv("OPENAI_MODEL", "gpt-4o-mini") if use_openai else "gemini-2.5-flash"
+        return os.getenv("OPENAI_MODEL", "gpt-4o-mini") if use_openai else os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
 
 def invoke_workflow(
